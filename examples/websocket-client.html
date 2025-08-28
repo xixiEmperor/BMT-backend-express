@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BMT Platform WebSocket 测试客户端</title>
+    <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        .status.connected { background-color: #d4edda; color: #155724; }
+        .status.disconnected { background-color: #f8d7da; color: #721c24; }
+        .status.connecting { background-color: #fff3cd; color: #856404; }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        .messages {
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .message {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-radius: 4px;
+            background-color: white;
+            border-left: 4px solid #007bff;
+        }
+        .message.notification {
+            border-left-color: #28a745;
+        }
+        .message.error {
+            border-left-color: #dc3545;
+            background-color: #f8d7da;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        .log {
+            font-family: monospace;
+            font-size: 12px;
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔄 BMT Platform WebSocket 测试客户端</h1>
+    
+    <!-- 连接状态 -->
+    <div class="container">
+        <h2>📡 连接状态</h2>
+        <div id="connectionStatus" class="status disconnected">未连接</div>
+        <div class="form-group">
+            <label for="serverUrl">服务器地址:</label>
+            <input type="text" id="serverUrl" value="ws://localhost:5000" />
+        </div>
+        <div class="form-group">
+            <label for="accessToken">访问令牌:</label>
+            <input type="text" id="accessToken" placeholder="在这里输入JWT令牌" />
+        </div>
+        <button id="connectBtn">连接</button>
+        <button id="disconnectBtn" disabled>断开</button>
+        <button id="getTokenBtn">获取测试令牌</button>
+    </div>
+
+    <div class="grid">
+        <!-- 频道管理 -->
+        <div class="container">
+            <h2>📻 频道管理</h2>
+            <div class="form-group">
+                <label for="channelName">频道名称:</label>
+                <select id="channelName">
+                    <option value="public:notifications">public:notifications</option>
+                    <option value="public:chat">public:chat</option>
+                    <option value="public:dashboard">public:dashboard</option>
+                    <option value="system:notifications">system:notifications</option>
+                    <option value="user:123">user:123</option>
+                    <option value="private:admin">private:admin</option>
+                </select>
+            </div>
+            <button id="subscribeBtn" disabled>订阅</button>
+            <button id="unsubscribeBtn" disabled>取消订阅</button>
+            
+            <h3>已订阅频道:</h3>
+            <div id="subscribedChannels" class="log">无</div>
+        </div>
+
+        <!-- 消息发布 -->
+        <div class="container">
+            <h2>📤 消息发布</h2>
+            <div class="form-group">
+                <label for="publishChannel">目标频道:</label>
+                <select id="publishChannel">
+                    <option value="public:notifications">public:notifications</option>
+                    <option value="public:chat">public:chat</option>
+                    <option value="public:dashboard">public:dashboard</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="messageType">消息类型:</label>
+                <select id="messageType">
+                    <option value="text">文本消息</option>
+                    <option value="notification">通知消息</option>
+                    <option value="data_update">数据更新</option>
+                    <option value="system">系统消息</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="messageContent">消息内容:</label>
+                <textarea id="messageContent" rows="3" placeholder="输入消息内容..."></textarea>
+            </div>
+            <button id="publishBtn" disabled>发布消息</button>
+        </div>
+    </div>
+
+    <!-- 消息显示 -->
+    <div class="container">
+        <h2>📨 接收到的消息</h2>
+        <button onclick="clearMessages()">清空消息</button>
+        <div id="messages" class="messages"></div>
+    </div>
+
+    <!-- 调试日志 -->
+    <div class="container">
+        <h2>🔍 调试日志</h2>
+        <button onclick="clearLogs()">清空日志</button>
+        <div id="debugLog" class="log"></div>
+    </div>
+
+    <script>
+        let socket = null;
+        let subscribedChannels = new Set();
+
+        // DOM元素
+        const connectionStatus = document.getElementById('connectionStatus');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const getTokenBtn = document.getElementById('getTokenBtn');
+        const subscribeBtn = document.getElementById('subscribeBtn');
+        const unsubscribeBtn = document.getElementById('unsubscribeBtn');
+        const publishBtn = document.getElementById('publishBtn');
+        const messages = document.getElementById('messages');
+        const debugLog = document.getElementById('debugLog');
+        const subscribedChannelsDiv = document.getElementById('subscribedChannels');
+
+        // 日志函数
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = `[${timestamp}] ${type.toUpperCase()}: ${message}\n`;
+            debugLog.textContent += logEntry;
+            debugLog.scrollTop = debugLog.scrollHeight;
+            console.log(logEntry);
+        }
+
+        // 更新连接状态
+        function updateConnectionStatus(status, message) {
+            connectionStatus.className = `status ${status}`;
+            connectionStatus.textContent = message;
+            
+            const isConnected = status === 'connected';
+            connectBtn.disabled = isConnected;
+            disconnectBtn.disabled = !isConnected;
+            subscribeBtn.disabled = !isConnected;
+            unsubscribeBtn.disabled = !isConnected;
+            publishBtn.disabled = !isConnected;
+        }
+
+        // 生成消息ID
+        function generateMessageId() {
+            return `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        }
+
+        // 获取测试令牌
+        async function getTestToken() {
+            try {
+                log('正在获取测试令牌...');
+                const response = await fetch('http://localhost:5000/v1/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        username: 'admin@example.com',
+                        password: 'password123'
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    document.getElementById('accessToken').value = data.accessToken;
+                    log('✅ 测试令牌获取成功');
+                } else {
+                    const error = await response.json();
+                    log(`❌ 获取令牌失败: ${error.message}`, 'error');
+                }
+            } catch (error) {
+                log(`❌ 网络错误: ${error.message}`, 'error');
+            }
+        }
+
+        // 连接WebSocket
+        function connect() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const accessToken = document.getElementById('accessToken').value;
+
+            if (!accessToken) {
+                alert('请先输入访问令牌');
+                return;
+            }
+
+            updateConnectionStatus('connecting', '正在连接...');
+            log(`开始连接到 ${serverUrl}`);
+
+            socket = io(serverUrl, {
+                auth: {
+                    token: `Bearer ${accessToken}`
+                },
+                transports: ['websocket'],
+                reconnection: false
+            });
+
+            // 连接事件
+            socket.on('connect', () => {
+                updateConnectionStatus('connected', `已连接 (ID: ${socket.id})`);
+                log('✅ WebSocket连接建立成功');
+            });
+
+            socket.on('connected', (data) => {
+                log(`🎉 服务器确认连接: ${JSON.stringify(data)}`);
+            });
+
+            socket.on('connect_error', (error) => {
+                updateConnectionStatus('disconnected', '连接失败');
+                log(`❌ 连接失败: ${error.message}`, 'error');
+            });
+
+            socket.on('disconnect', (reason) => {
+                updateConnectionStatus('disconnected', '连接断开');
+                log(`🔌 连接断开: ${reason}`);
+                subscribedChannels.clear();
+                updateSubscribedChannels();
+            });
+
+            // 消息事件
+            socket.on('message', (data) => {
+                log(`📨 收到消息: ${JSON.stringify(data)}`);
+                displayMessage(data, 'message');
+            });
+
+            socket.on('notification', (data) => {
+                log(`🔔 系统通知: ${JSON.stringify(data)}`);
+                displayMessage(data, 'notification');
+            });
+
+            socket.on('ack', (data) => {
+                log(`✅ 收到确认: ${JSON.stringify(data)}`);
+            });
+
+            socket.on('error', (error) => {
+                log(`❌ Socket错误: ${error}`, 'error');
+            });
+
+            // 心跳
+            socket.on('heartbeat_ack', (data) => {
+                log(`💓 心跳确认: ${data.timestamp}`);
+            });
+        }
+
+        // 断开连接
+        function disconnect() {
+            if (socket) {
+                socket.disconnect();
+                socket = null;
+            }
+            updateConnectionStatus('disconnected', '已断开');
+            subscribedChannels.clear();
+            updateSubscribedChannels();
+        }
+
+        // 订阅频道
+        function subscribe() {
+            const channelName = document.getElementById('channelName').value;
+            const messageId = generateMessageId();
+
+            log(`📡 订阅频道: ${channelName}`);
+
+            socket.emit('subscribe', {
+                topic: channelName,
+                messageId: messageId,
+                timestamp: Date.now()
+            }, (response) => {
+                if (response.status === 'success') {
+                    log(`✅ 订阅成功: ${channelName} (订阅者: ${response.subscriberCount})`);
+                    subscribedChannels.add(channelName);
+                    updateSubscribedChannels();
+                } else {
+                    log(`❌ 订阅失败: ${response.error}`, 'error');
+                }
+            });
+        }
+
+        // 取消订阅
+        function unsubscribe() {
+            const channelName = document.getElementById('channelName').value;
+            const messageId = generateMessageId();
+
+            log(`🚫 取消订阅: ${channelName}`);
+
+            socket.emit('unsubscribe', {
+                topic: channelName,
+                messageId: messageId,
+                timestamp: Date.now()
+            }, (response) => {
+                if (response.status === 'success') {
+                    log(`✅ 取消订阅成功: ${channelName}`);
+                    subscribedChannels.delete(channelName);
+                    updateSubscribedChannels();
+                } else {
+                    log(`❌ 取消订阅失败: ${response.error}`, 'error');
+                }
+            });
+        }
+
+        // 发布消息
+        function publish() {
+            const channel = document.getElementById('publishChannel').value;
+            const messageType = document.getElementById('messageType').value;
+            const content = document.getElementById('messageContent').value;
+
+            if (!content.trim()) {
+                alert('请输入消息内容');
+                return;
+            }
+
+            const messageId = generateMessageId();
+            let payload;
+
+            // 根据消息类型构造payload
+            switch (messageType) {
+                case 'text':
+                    payload = {
+                        type: 'text',
+                        content: content,
+                        user: {
+                            id: 'test_user',
+                            name: '测试用户'
+                        }
+                    };
+                    break;
+                case 'notification':
+                    payload = {
+                        type: 'notification',
+                        title: '测试通知',
+                        content: content,
+                        level: 'info'
+                    };
+                    break;
+                case 'data_update':
+                    payload = {
+                        type: 'data_update',
+                        entity: 'test_entity',
+                        action: 'update',
+                        data: { content: content }
+                    };
+                    break;
+                case 'system':
+                    payload = {
+                        type: 'system',
+                        content: content,
+                        level: 'info'
+                    };
+                    break;
+            }
+
+            log(`📤 发布消息到 ${channel}: ${JSON.stringify(payload)}`);
+
+            socket.emit('publish', {
+                topic: channel,
+                payload: payload,
+                messageId: messageId,
+                timestamp: Date.now(),
+                ackRequired: true
+            }, (response) => {
+                if (response.status === 'success') {
+                    log(`✅ 消息发布成功: 送达 ${response.deliveredTo} 个订阅者`);
+                    document.getElementById('messageContent').value = '';
+                } else {
+                    log(`❌ 消息发布失败: ${response.error}`, 'error');
+                }
+            });
+        }
+
+        // 更新订阅频道显示
+        function updateSubscribedChannels() {
+            subscribedChannelsDiv.textContent = subscribedChannels.size > 0 
+                ? Array.from(subscribedChannels).join('\n') 
+                : '无';
+        }
+
+        // 显示消息
+        function displayMessage(data, type) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+            
+            const timestamp = new Date(data.timestamp || Date.now()).toLocaleTimeString();
+            const messageContent = type === 'message' 
+                ? `[${timestamp}] 频道: ${data.topic}\n发送者: ${data.from || '系统'}\n内容: ${JSON.stringify(data.payload, null, 2)}`
+                : `[${timestamp}] 系统通知 (${data.level})\n${data.message}`;
+            
+            messageDiv.textContent = messageContent;
+            messages.appendChild(messageDiv);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        // 清空消息
+        function clearMessages() {
+            messages.innerHTML = '';
+        }
+
+        // 清空日志
+        function clearLogs() {
+            debugLog.textContent = '';
+        }
+
+        // 事件绑定
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        getTokenBtn.addEventListener('click', getTestToken);
+        subscribeBtn.addEventListener('click', subscribe);
+        unsubscribeBtn.addEventListener('click', unsubscribe);
+        publishBtn.addEventListener('click', publish);
+
+        // 初始化
+        updateConnectionStatus('disconnected', '未连接');
+        log('🚀 WebSocket测试客户端已加载');
+        
+        // 定期发送心跳
+        setInterval(() => {
+            if (socket && socket.connected) {
+                socket.emit('heartbeat', {
+                    timestamp: Date.now()
+                });
+            }
+        }, 30000);
+    </script>
+</body>
+</html>
+
