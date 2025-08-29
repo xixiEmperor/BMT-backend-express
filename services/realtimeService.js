@@ -7,8 +7,8 @@ import logger from '../utils/logger.js';
  */
 class RealtimeService {
   constructor() {
-    this.io = null;
-    this.connections = new Map(); // 存储连接信息
+    this.io = null; // 一个io可以存储多个socket连接，每个socket连接都是一个客户端连接
+    this.connections = new Map(); // 存储连接信息，key是连接id，value是对应的客户端连接信息
     this.channels = new Map(); // 存储频道信息
     this.messageBuffer = new Map(); // 消息缓冲区
     this.sequenceNumbers = new Map(); // 频道序列号
@@ -296,7 +296,7 @@ class RealtimeService {
    */
   hasPermission(user, topic, action) {
     // 系统管理员有所有权限
-    if (user.role === 'admin') {
+    if (user.role === 'ROLE_ADMIN') {
       return true;
     }
 
@@ -317,7 +317,7 @@ class RealtimeService {
     if (topic.startsWith('system:')) {
       // 系统频道只有管理员可以发布，但所有人可以订阅
       if (action === 'publish') {
-        return user.role === 'admin';
+        return user.role === 'ROLE_ADMIN';
       }
       return true;
     }
