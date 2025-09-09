@@ -1,29 +1,36 @@
-import { authenticateSocket } from '../middleware/auth.js';
-import { v4 as uuidv4 } from 'uuid';
-import logger from '../utils/logger.js';
+// 导入依赖模块
+import { authenticateSocket } from '../middleware/auth.js'; // Socket认证中间件
+import { v4 as uuidv4 } from 'uuid'; // UUID生成器，用于生成唯一标识符
+import logger from '../utils/logger.js'; // 日志记录工具
 
 /**
  * 实时通信服务类
+ * 负责管理WebSocket连接、频道订阅、消息发布等功能
+ * 支持多客户端连接、频道权限控制、消息确认机制等
  */
 class RealtimeService {
+  /**
+   * 构造函数 - 初始化实时通信服务的核心数据结构
+   */
   constructor() {
-    this.io = null; // 一个io可以存储多个socket连接，每个socket连接都是一个客户端连接
-    this.connections = new Map(); // 存储连接信息，key是连接id，value是对应的客户端连接信息
-    this.channels = new Map(); // 存储频道信息
-    this.messageBuffer = new Map(); // 消息缓冲区
-    this.sequenceNumbers = new Map(); // 频道序列号
+    this.io = null; // Socket.IO服务器实例，管理所有WebSocket连接
+    this.connections = new Map(); // 存储所有活跃连接信息，key: connectionId, value: 连接详情
+    this.channels = new Map(); // 存储所有频道信息，key: 频道名称, value: 频道详情
+    this.messageBuffer = new Map(); // 消息缓冲区，用于处理离线消息或重发机制
+    this.sequenceNumbers = new Map(); // 各频道的消息序列号，确保消息有序性
   }
 
   /**
    * 初始化Socket.IO服务
+   * @param {Object} io - Socket.IO服务器实例
    */
   initialize(io) {
     this.io = io;
     
-    // 设置认证中间件
+    // 设置认证中间件（暂时注释，可根据需要启用）
     // io.use(authenticateSocket);
     
-    // 监听连接事件
+    // 监听客户端连接事件，当有新客户端连接时触发
     io.on('connection', (socket) => {
       this.handleConnection(socket);
     });
@@ -32,12 +39,14 @@ class RealtimeService {
   }
 
   /**
-   * 处理新连接
+   * 处理新客户端连接
+   * @param {Object} socket - Socket.IO客户端连接对象
    */
   handleConnection(socket) {
-    const user = socket.user;
-    const connectionId = socket.id;
+    const user = socket.user; // 从socket中获取用户信息（通过认证中间件设置）
+    const connectionId = socket.id; // 获取唯一的连接ID
 
+    // 记录用户连接日志
     logger.realtime('User Connected', {
       userId: user.userId,
       connectionId,
@@ -45,19 +54,19 @@ class RealtimeService {
       totalConnections: this.connections.size + 1
     });
 
-    // 存储连接信息
+    // 将连接信息存储到内存中，包含用户信息、连接时间、订阅频道等
     this.connections.set(connectionId, {
-      socket,
-      user,
-      connectedAt: Date.now(),
-      lastActivity: Date.now(),
-      subscribedChannels: new Set()
+      socket, // Socket.IO连接对象
+      user, // 用户信息
+      connectedAt: Date.now(), // 连接建立时间
+      lastActivity: Date.now(), // 最后活跃时间（用于心跳检测）
+      subscribedChannels: new Set() // 该连接订阅的频道集合
     });
 
-    // 绑定事件处理器
+    // 为该socket绑定各种事件处理器
     this.bindEventHandlers(socket);
 
-    // 发送连接确认
+    // 向客户端发送连接成功确认消息
     socket.emit('connected', {
       connectionId,
       timestamp: Date.now(),
@@ -69,80 +78,86 @@ class RealtimeService {
   }
 
   /**
-   * 绑定事件处理器
+   * 为socket连接绑定各种事件处理器
+   * @param {Object} socket - Socket.IO客户端连接对象
    */
   bindEventHandlers(socket) {
     const connectionId = socket.id;
 
-    // 订阅频道
+    // 监听客户端订阅频道事件
     socket.on('subscribe', (data, callback) => {
       this.handleSubscribe(connectionId, data, callback);
     });
 
-    // 取消订阅
+    // 监听客户端取消订阅事件
     socket.on('unsubscribe', (data, callback) => {
       this.handleUnsubscribe(connectionId, data, callback);
     });
 
-    // 发布消息
+    // 监听客户端发布消息事件
     socket.on('publish', (data, callback) => {
       this.handlePublish(connectionId, data, callback);
     });
 
-    // 心跳
+    // 监听客户端心跳事件，用于保持连接活跃状态
     socket.on('heartbeat', (data) => {
+      console.log('收到心跳事件:', data);
       this.handleHeartbeat(connectionId, data);
     });
 
-    // 断开连接
+    // 监听客户端断开连接事件
     socket.on('disconnect', (reason) => {
       this.handleDisconnect(connectionId, reason);
     });
 
-    // 错误处理
+    // 监听socket错误事件
     socket.on('error', (error) => {
       console.error(`Socket错误 (${connectionId}):`, error);
     });
   }
 
   /**
-   * 处理订阅请求
+   * 处理客户端订阅频道请求
+   * @param {string} connectionId - 连接ID
+   * @param {Object} data - 订阅数据，包含topic和messageId
+   * @param {Function} callback - 回调函数，用于发送确认消息
    */
   async handleSubscribe(connectionId, data, callback) {
     try {
-      const { topic, messageId } = data;
-      const connection = this.connections.get(connectionId);
+      const { topic, messageId } = data; // 解构获取频道名称和消息ID
+      const connection = this.connections.get(connectionId); // 获取连接信息
 
+      // 检查连接是否存在
       if (!connection) {
         return this.sendError(callback, 'connection_not_found', '连接不存在');
       }
 
-      // 检查权限
+      // 检查用户是否有订阅该频道的权限
       if (!this.hasPermission(connection.user, topic, 'subscribe')) {
         return this.sendError(callback, 'permission_denied', '没有订阅权限');
       }
 
-      // 加入Socket.IO房间
+      // 将socket加入指定的Socket.IO房间（频道）
       connection.socket.join(topic);
-      connection.subscribedChannels.add(topic);
+      connection.subscribedChannels.add(topic); // 记录该连接订阅的频道
 
-      // 更新频道信息
+      // 如果频道不存在，则创建新频道
       if (!this.channels.has(topic)) {
         this.channels.set(topic, {
-          name: topic,
-          subscribers: new Set(),
-          createdAt: Date.now(),
-          messageCount: 0
+          name: topic, // 频道名称
+          subscribers: new Set(), // 订阅者集合
+          createdAt: Date.now(), // 创建时间
+          messageCount: 0 // 消息计数
         });
       }
 
       const channel = this.channels.get(topic);
-      channel.subscribers.add(connectionId);
+      channel.subscribers.add(connectionId); // 将连接ID添加到订阅者列表
 
-      // 发送ACK
+      // 发送订阅成功的确认消息
       this.sendAck(callback, messageId, 'success', {
         topic,
-        subscriberCount: channel.subscribers.size
+        subscriberCount: channel.subscribers.size // 返回当前订阅者数量
       });
 
       console.log(`用户 ${connection.user.userId} 订阅了频道 ${topic}`);
@@ -154,36 +169,40 @@ class RealtimeService {
   }
 
   /**
-   * 处理取消订阅请求
+   * 处理客户端取消订阅频道请求
+   * @param {string} connectionId - 连接ID
+   * @param {Object} data - 取消订阅数据，包含topic和messageId
+   * @param {Function} callback - 回调函数，用于发送确认消息
    */
   async handleUnsubscribe(connectionId, data, callback) {
     try {
-      const { topic, messageId } = data;
-      const connection = this.connections.get(connectionId);
+      const { topic, messageId } = data; // 解构获取频道名称和消息ID
+      const connection = this.connections.get(connectionId); // 获取连接信息
 
+      // 检查连接是否存在
       if (!connection) {
         return this.sendError(callback, 'connection_not_found', '连接不存在');
       }
 
-      // 离开Socket.IO房间
+      // 让socket离开指定的Socket.IO房间（频道）
       connection.socket.leave(topic);
-      connection.subscribedChannels.delete(topic);
+      connection.subscribedChannels.delete(topic); // 从连接的订阅频道列表中移除
 
-      // 更新频道信息
+      // 更新频道的订阅者信息
       const channel = this.channels.get(topic);
       if (channel) {
-        channel.subscribers.delete(connectionId);
+        channel.subscribers.delete(connectionId); // 从频道订阅者列表中移除该连接
         
-        // 如果没有订阅者了，删除频道
+        // 如果频道没有订阅者了，删除频道以释放内存
         if (channel.subscribers.size === 0) {
           this.channels.delete(topic);
         }
       }
 
-      // 发送ACK
+      // 发送取消订阅成功的确认消息
       this.sendAck(callback, messageId, 'success', {
         topic,
-        subscriberCount: channel ? channel.subscribers.size : 0
+        subscriberCount: channel ? channel.subscribers.size : 0 // 返回剩余订阅者数量
       });
 
       console.log(`用户 ${connection.user.userId} 取消订阅频道 ${topic}`);
@@ -195,52 +214,56 @@ class RealtimeService {
   }
 
   /**
-   * 处理发布消息请求
+   * 处理客户端发布消息请求
+   * @param {string} connectionId - 连接ID
+   * @param {Object} data - 消息数据，包含topic、payload、messageId等
+   * @param {Function} callback - 回调函数，用于发送确认消息
    */
   async handlePublish(connectionId, data, callback) {
     try {
-      const { topic, payload, messageId, ackRequired = true } = data;
-      const connection = this.connections.get(connectionId);
+      const { topic, payload, messageId, ackRequired = true } = data; // 解构消息数据
+      const connection = this.connections.get(connectionId); // 获取连接信息
 
+      // 检查连接是否存在
       if (!connection) {
         return this.sendError(callback, 'connection_not_found', '连接不存在');
       }
 
-      // 检查权限
+      // 检查用户是否有向该频道发布消息的权限
       if (!this.hasPermission(connection.user, topic, 'publish')) {
         return this.sendError(callback, 'permission_denied', '没有发布权限');
       }
 
-      // 检查频道是否存在
+      // 检查目标频道是否存在
       if (!this.channels.has(topic)) {
         return this.sendError(callback, 'channel_not_found', '频道不存在');
       }
 
-      // 生成消息
+      // 构造消息对象
       const message = {
-        id: uuidv4(),
-        topic,
-        type: 'event',
-        payload,
-        timestamp: Date.now(),
-        from: connection.user.userId,
-        seq: this.getNextSequenceNumber(topic)
+        id: uuidv4(), // 生成唯一消息ID
+        topic, // 目标频道
+        type: 'event', // 消息类型
+        payload, // 消息内容
+        timestamp: Date.now(), // 发送时间戳
+        from: connection.user.userId, // 发送者用户ID
+        seq: this.getNextSequenceNumber(topic) // 获取该频道的下一个序列号
       };
 
-      // 发送消息到订阅者
-      this.io.to(topic).emit('message', message);
+      // 向该频道的所有订阅者发送消息
+      this.io.to(topic).emit('event', message);
 
-      // 更新频道统计
+      // 更新频道的消息统计
       const channel = this.channels.get(topic);
       channel.messageCount++;
 
-      // 发送ACK（如果需要）
+      // 如果需要确认，发送ACK响应
       if (ackRequired) {
         this.sendAck(callback, messageId, 'success', {
-          messageId: message.id,
+          messageId: message.id, // 返回生成的消息ID
           topic,
-          seq: message.seq,
-          deliveredTo: channel.subscribers.size
+          seq: message.seq, // 返回消息序列号
+          deliveredTo: channel.subscribers.size // 返回消息投递的订阅者数量
         });
       }
 
@@ -253,20 +276,29 @@ class RealtimeService {
   }
 
   /**
-   * 处理心跳
+   * 处理客户端心跳请求
+   * 用于保持连接活跃状态，防止连接超时
+   * @param {string} connectionId - 连接ID
+   * @param {Object} data - 心跳数据
    */
   handleHeartbeat(connectionId, data) {
     const connection = this.connections.get(connectionId);
     if (connection) {
+      // 更新连接的最后活跃时间
       connection.lastActivity = Date.now();
+      // 向客户端发送心跳确认响应
       connection.socket.emit('heartbeat_ack', {
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        ...data
       });
     }
   }
 
   /**
-   * 处理断开连接
+   * 处理客户端断开连接事件
+   * 清理连接相关的所有资源和订阅关系
+   * @param {string} connectionId - 连接ID
+   * @param {string} reason - 断开连接的原因
    */
   handleDisconnect(connectionId, reason) {
     const connection = this.connections.get(connectionId);
@@ -274,109 +306,129 @@ class RealtimeService {
 
     console.log(`用户 ${connection.user.userId} 断开连接 (${connectionId}): ${reason}`);
 
-    // 从所有订阅的频道中移除
+    // 从该连接订阅的所有频道中移除该连接
     for (const topic of connection.subscribedChannels) {
       const channel = this.channels.get(topic);
       if (channel) {
-        channel.subscribers.delete(connectionId);
+        channel.subscribers.delete(connectionId); // 从频道订阅者列表中移除
         
-        // 如果没有订阅者了，删除频道
+        // 如果频道没有订阅者了，删除频道以释放内存
         if (channel.subscribers.size === 0) {
           this.channels.delete(topic);
         }
       }
     }
 
-    // 删除连接记录
+    // 从连接管理器中删除该连接记录
     this.connections.delete(connectionId);
   }
 
   /**
-   * 检查用户权限
+   * 检查用户对指定频道的操作权限
+   * @param {Object} user - 用户对象，包含userId、role、permissions等信息
+   * @param {string} topic - 频道名称
+   * @param {string} action - 操作类型（'subscribe' | 'publish'）
+   * @returns {boolean} 是否有权限
    */
   hasPermission(user, topic, action) {
-    // 系统管理员有所有权限
+    // 系统管理员拥有所有频道的所有权限
     if (user.role === 'ROLE_ADMIN') {
       return true;
     }
 
-    // 检查频道类型和权限
+    // 根据频道前缀检查权限
     if (topic.startsWith('public:')) {
-      return true; // 公共频道所有人可以访问
+      return true; // 公共频道：所有用户都可以订阅和发布
     }
 
     if (topic.startsWith('private:')) {
-      // 私有频道需要特定权限
+      // 私有频道：需要特定权限才能访问
       return user.permissions?.includes('private_channel_access');
     }
 
     if (topic.startsWith(`user:${user.userId}`)) {
-      return true; // 用户自己的频道
+      return true; // 用户专属频道：用户对自己的频道有完全权限
     }
 
     if (topic.startsWith('system:')) {
-      // 系统频道只有管理员可以发布，但所有人可以订阅
+      // 系统频道：所有用户可以订阅，但只有管理员可以发布
       if (action === 'publish') {
         return user.role === 'ROLE_ADMIN';
       }
-      return true;
+      return true; // 允许订阅
     }
 
+    // 默认情况下拒绝访问
     return false;
   }
 
   /**
-   * 获取下一个序列号
+   * 获取指定频道的下一个消息序列号
+   * 序列号用于保证消息的顺序性，便于客户端检测消息丢失
+   * @param {string} topic - 频道名称
+   * @returns {number} 下一个序列号
    */
   getNextSequenceNumber(topic) {
-    const current = this.sequenceNumbers.get(topic) || 0;
-    const next = current + 1;
-    this.sequenceNumbers.set(topic, next);
+    const current = this.sequenceNumbers.get(topic) || 0; // 获取当前序列号，默认为0
+    const next = current + 1; // 计算下一个序列号
+    this.sequenceNumbers.set(topic, next); // 更新存储的序列号
     return next;
   }
 
   /**
-   * 发送ACK响应
+   * 发送确认(ACK)响应给客户端
+   * @param {Function} callback - 客户端回调函数
+   * @param {string} messageId - 原始消息ID
+   * @param {string} status - 状态（'success' | 'error'）
+   * @param {Object} data - 额外返回数据
    */
   sendAck(callback, messageId, status, data = {}) {
     if (typeof callback === 'function') {
       callback({
-        id: messageId,
-        type: 'ack',
-        status,
-        ...data
+        id: messageId, // 原始消息ID
+        type: 'ack', // 响应类型
+        status, // 处理状态
+        ...data // 扩展数据
       });
     }
   }
 
   /**
-   * 发送错误响应
+   * 发送错误响应给客户端
+   * @param {Function} callback - 客户端回调函数
+   * @param {string} code - 错误代码
+   * @param {string} message - 错误信息
    */
   sendError(callback, code, message) {
     if (typeof callback === 'function') {
       callback({
-        type: 'error',
-        code,
-        message
+        type: 'error', // 响应类型
+        code, // 错误代码
+        message // 错误信息
       });
     }
   }
 
   /**
-   * 系统广播
+   * 系统广播通知
+   * 用于向所有用户或指定用户发送系统级通知消息
+   * @param {string} level - 通知级别（'info' | 'warning' | 'error' | 'success'）
+   * @param {string} message - 通知消息内容
+   * @param {Array<string>} targetUsers - 目标用户ID数组，为null时广播给所有用户
    */
   broadcastSystemNotification(level, message, targetUsers = null) {
     try {
+      // 构造通知消息对象
       const notification = {
-        id: uuidv4(),
-        type: 'notification',
-        level,
-        message,
-        timestamp: Date.now()
+        id: uuidv4(), // 生成唯一通知ID
+        type: 'notification', // 消息类型
+        level, // 通知级别
+        message, // 通知内容
+        timestamp: Date.now() // 发送时间戳
       };
 
       if (targetUsers) {
-        // 发送给特定用户
+        // 发送给指定的用户列表
         for (const [connectionId, connection] of this.connections.entries()) {
           if (targetUsers.includes(connection.user.userId)) {
             connection.socket.emit('notification', notification);
@@ -395,40 +447,47 @@ class RealtimeService {
   }
 
   /**
-   * 获取服务统计信息
+   * 获取实时通信服务的统计信息
+   * 包含连接数、频道数、消息总数等运营数据
+   * @returns {Object} 统计信息对象
    */
   getStats() {
     return {
-      connections: this.connections.size,
-      channels: this.channels.size,
-      totalMessages: Array.from(this.channels.values())
+      connections: this.connections.size, // 当前活跃连接数
+      channels: this.channels.size, // 当前频道总数
+      totalMessages: Array.from(this.channels.values()) // 所有频道的消息总数
         .reduce((total, channel) => total + channel.messageCount, 0),
       channelDetails: Array.from(this.channels.entries()).map(([name, channel]) => ({
-        name,
-        subscribers: channel.subscribers.size,
-        messageCount: channel.messageCount,
-        createdAt: channel.createdAt
+        name, // 频道名称
+        subscribers: channel.subscribers.size, // 订阅者数量
+        messageCount: channel.messageCount, // 频道消息数
+        createdAt: channel.createdAt // 频道创建时间
       }))
     };
   }
 
   /**
-   * 清理过期连接
+   * 清理过期的WebSocket连接
+   * 定期调用此方法可以释放长时间无活动的连接资源
+   * @param {number} timeoutMs - 超时时间（毫秒），默认5分钟
+   * @returns {number} 清理的连接数量
    */
-  cleanupStaleConnections(timeoutMs = 5 * 60 * 1000) { // 5分钟
+  cleanupStaleConnections(timeoutMs = 5 * 60 * 1000) { // 默认5分钟超时
     const now = Date.now();
     let cleanedCount = 0;
 
+    // 遍历所有连接，检查是否超时
     for (const [connectionId, connection] of this.connections.entries()) {
       if (now - connection.lastActivity > timeoutMs) {
         console.log(`清理过期连接: ${connectionId}`);
-        connection.socket.disconnect(true);
+        connection.socket.disconnect(true); // 强制断开连接
         cleanedCount++;
       }
     }
 
-    return cleanedCount;
+    return cleanedCount; // 返回清理的连接数量
   }
 }
 
+// 导出实时通信服务类
 export default RealtimeService;

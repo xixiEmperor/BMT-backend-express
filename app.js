@@ -55,17 +55,22 @@ app.use(requestLogger);
 
 // CORS配置
 app.use(cors({
-  origin: config.cors.origin,
-  credentials: config.cors.credentials,
+  origin: 'http://localhost:5173', // 指定前端域名，不要用通配符
+  credentials: true,
   allowedHeaders: [
-    'Content-Type', 
-    'Authorization', 
-    'X-Request-Id', 
-    'X-SDK-App', 
-    'X-SDK-Release', 
-    'X-SDK-Version'
+    'Content-Type',
+    'Authorization',
+    'X-Request-Id',
+    'X-SDK-App',
+    'X-SDK-Release',
+    'X-SDK-Version',
+    // 添加CORS相关的headers
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers',
+    'Access-Control-Allow-Origin',
+    'Access-Control-Allow-Credentials'
   ],
-  methods: ['GET', 'POST', 'OPTIONS']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
 }));
 
 // 请求体解析
