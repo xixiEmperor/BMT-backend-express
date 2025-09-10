@@ -29,6 +29,15 @@ class RealtimeService {
     
     // 设置认证中间件（暂时注释，可根据需要启用）
     // io.use(authenticateSocket);
+
+    io.use((socket, next) => {
+      socket.user = {
+        userId: socket.handshake.query.userId,
+        role: socket.handshake.query.userRole,
+      }
+      console.log('用户连接:', socket.user);
+      next();
+    })
     
     // 监听客户端连接事件，当有新客户端连接时触发
     io.on('connection', (socket) => {
@@ -107,6 +116,7 @@ class RealtimeService {
 
     // 监听客户端断开连接事件
     socket.on('disconnect', (reason) => {
+      console.log('客户端断开连接:', connectionId, reason);
       this.handleDisconnect(connectionId, reason);
     });
 
@@ -133,9 +143,9 @@ class RealtimeService {
       }
 
       // 检查用户是否有订阅该频道的权限
-      if (!this.hasPermission(connection.user, topic, 'subscribe')) {
-        return this.sendError(callback, 'permission_denied', '没有订阅权限');
-      }
+      // if (!this.hasPermission(connection.user, topic, 'subscribe')) {
+      //   return this.sendError(callback, 'permission_denied', '没有订阅权限');
+      // }
 
       // 将socket加入指定的Socket.IO房间（频道）
       connection.socket.join(topic);
@@ -230,9 +240,9 @@ class RealtimeService {
       }
 
       // 检查用户是否有向该频道发布消息的权限
-      if (!this.hasPermission(connection.user, topic, 'publish')) {
-        return this.sendError(callback, 'permission_denied', '没有发布权限');
-      }
+      // if (!this.hasPermission(connection.user, topic, 'publish')) {
+      //   return this.sendError(callback, 'permission_denied', '没有发布权限');
+      // }
 
       // 检查目标频道是否存在
       if (!this.channels.has(topic)) {
