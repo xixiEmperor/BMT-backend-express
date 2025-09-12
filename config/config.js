@@ -9,7 +9,9 @@ export const config = {
   
   // 数据库配置
   mongodb: {
-    uri: process.env.MONGODB_URI || 'mongodb://localhost:27017/bmt-backend'
+    uri: process.env.MONGODB_URI || 'mongodb://localhost:27017/bmt-backend',
+    user: process.env.MONGODB_USER,
+    password: process.env.MONGODB_PASSWORD
   },
   
   // JWT配置

@@ -2,6 +2,7 @@
 import { authenticateSocket } from '../middleware/auth.js'; // Socket认证中间件
 import { v4 as uuidv4 } from 'uuid'; // UUID生成器，用于生成唯一标识符
 import logger from '../utils/logger.js'; // 日志记录工具
+import Connection from '../models/Connection.js'; // 连接数据模型
 
 /**
  * 实时通信服务类
@@ -51,39 +52,56 @@ class RealtimeService {
    * 处理新客户端连接
    * @param {Object} socket - Socket.IO客户端连接对象
    */
-  handleConnection(socket) {
-    const user = socket.user; // 从socket中获取用户信息（通过认证中间件设置）
-    const connectionId = socket.id; // 获取唯一的连接ID
+  async handleConnection(socket) {
+    try {
+      const user = socket.user; // 从socket中获取用户信息（通过认证中间件设置）
+      const connectionId = socket.id; // 获取唯一的连接ID
 
-    // 记录用户连接日志
-    logger.realtime('User Connected', {
-      userId: user.userId,
-      connectionId,
-      role: user.role,
-      totalConnections: this.connections.size + 1
-    });
+      // 记录用户连接日志
+      logger.realtime('User Connected', {
+        userId: user.userId,
+        connectionId,
+        role: user.role,
+        totalConnections: this.connections.size + 1
+      });
 
-    // 将连接信息存储到内存中，包含用户信息、连接时间、订阅频道等
-    this.connections.set(connectionId, {
-      socket, // Socket.IO连接对象
-      user, // 用户信息
-      connectedAt: Date.now(), // 连接建立时间
-      lastActivity: Date.now(), // 最后活跃时间（用于心跳检测）
-      subscribedChannels: new Set() // 该连接订阅的频道集合
-    });
+      // 将连接信息存储到内存中，包含用户信息、连接时间、订阅频道等
+      this.connections.set(connectionId, {
+        socket, // Socket.IO连接对象
+        user, // 用户信息
+        connectedAt: Date.now(), // 连接建立时间
+        lastActivity: Date.now(), // 最后活跃时间（用于心跳检测）
+        subscribedChannels: new Set() // 该连接订阅的频道集合
+      });
 
-    // 为该socket绑定各种事件处理器
-    this.bindEventHandlers(socket);
+      // 将连接信息保存到数据库
+      const connectionData = new Connection({
+        connectionId,
+        userId: user.userId,
+        userRole: user.role,
+        connectedAt: new Date(),
+        lastActivity: new Date(),
+        subscribedChannels: [],
+        status: 'active'
+      });
+      await connectionData.save();
 
-    // 向客户端发送连接成功确认消息
-    socket.emit('connected', {
-      connectionId,
-      timestamp: Date.now(),
-      user: {
-        id: user.userId,
-        role: user.role
-      }
-    });
+      // 为该socket绑定各种事件处理器
+      this.bindEventHandlers(socket);
+
+      // 向客户端发送连接成功确认消息
+      socket.emit('connected', {
+        connectionId,
+        timestamp: Date.now(),
+        user: {
+          id: user.userId,
+          role: user.role
+        }
+      });
+    } catch (error) {
+      console.error('处理连接失败:', error);
+      socket.emit('error', { message: '连接处理失败' });
+    }
   }
 
   /**
@@ -151,6 +169,15 @@ class RealtimeService {
       connection.socket.join(topic);
       connection.subscribedChannels.add(topic); // 记录该连接订阅的频道
 
+      // 更新数据库中的连接信息
+      await Connection.findOneAndUpdate(
+        { connectionId },
+        { 
+          $addToSet: { subscribedChannels: topic },
+          lastActivity: new Date()
+        }
+      );
+
       // 如果频道不存在，则创建新频道
       if (!this.channels.has(topic)) {
         this.channels.set(topic, {
@@ -197,6 +224,15 @@ class RealtimeService {
       // 让socket离开指定的Socket.IO房间（频道）
       connection.socket.leave(topic);
       connection.subscribedChannels.delete(topic); // 从连接的订阅频道列表中移除
+
+      // 更新数据库中的连接信息
+      await Connection.findOneAndUpdate(
+        { connectionId },
+        { 
+          $pull: { subscribedChannels: topic },
+          lastActivity: new Date()
+        }
+      );
 
       // 更新频道的订阅者信息
       const channel = this.channels.get(topic);
@@ -291,16 +327,27 @@ class RealtimeService {
    * @param {string} connectionId - 连接ID
    * @param {Object} data - 心跳数据
    */
-  handleHeartbeat(connectionId, data) {
-    const connection = this.connections.get(connectionId);
-    if (connection) {
-      // 更新连接的最后活跃时间
-      connection.lastActivity = Date.now();
-      // 向客户端发送心跳确认响应
-      connection.socket.emit('heartbeat_ack', {
-        timestamp: Date.now(),
-        ...data
-      });
+  async handleHeartbeat(connectionId, data) {
+    try {
+      const connection = this.connections.get(connectionId);
+      if (connection) {
+        // 更新连接的最后活跃时间
+        connection.lastActivity = Date.now();
+        
+        // 更新数据库中的最后活跃时间
+        await Connection.findOneAndUpdate(
+          { connectionId },
+          { lastActivity: new Date() }
+        );
+        
+        // 向客户端发送心跳确认响应
+        connection.socket.emit('heartbeat_ack', {
+          timestamp: Date.now(),
+          ...data
+        });
+      }
+    } catch (error) {
+      console.error('处理心跳失败:', error);
     }
   }
 
@@ -310,27 +357,41 @@ class RealtimeService {
    * @param {string} connectionId - 连接ID
    * @param {string} reason - 断开连接的原因
    */
-  handleDisconnect(connectionId, reason) {
-    const connection = this.connections.get(connectionId);
-    if (!connection) return;
+  async handleDisconnect(connectionId, reason) {
+    try {
+      const connection = this.connections.get(connectionId);
+      if (!connection) return;
 
-    console.log(`用户 ${connection.user.userId} 断开连接 (${connectionId}): ${reason}`);
+      console.log(`用户 ${connection.user.userId} 断开连接 (${connectionId}): ${reason}`);
 
-    // 从该连接订阅的所有频道中移除该连接
-    for (const topic of connection.subscribedChannels) {
-      const channel = this.channels.get(topic);
-      if (channel) {
-        channel.subscribers.delete(connectionId); // 从频道订阅者列表中移除
-        
-        // 如果频道没有订阅者了，删除频道以释放内存
-        if (channel.subscribers.size === 0) {
-          this.channels.delete(topic);
+      // 更新数据库中的连接状态
+      await Connection.findOneAndUpdate(
+        { connectionId },
+        { 
+          status: 'disconnected',
+          disconnectedAt: new Date(),
+          disconnectReason: reason
+        }
+      );
+
+      // 从该连接订阅的所有频道中移除该连接
+      for (const topic of connection.subscribedChannels) {
+        const channel = this.channels.get(topic);
+        if (channel) {
+          channel.subscribers.delete(connectionId); // 从频道订阅者列表中移除
+          
+          // 如果频道没有订阅者了，删除频道以释放内存
+          if (channel.subscribers.size === 0) {
+            this.channels.delete(topic);
+          }
         }
       }
-    }
 
-    // 从连接管理器中删除该连接记录
-    this.connections.delete(connectionId);
+      // 从连接管理器中删除该连接记录
+      this.connections.delete(connectionId);
+    } catch (error) {
+      console.error('处理断开连接失败:', error);
+    }
   }
 
   /**
@@ -461,19 +522,47 @@ class RealtimeService {
    * 包含连接数、频道数、消息总数等运营数据
    * @returns {Object} 统计信息对象
    */
-  getStats() {
-    return {
-      connections: this.connections.size, // 当前活跃连接数
-      channels: this.channels.size, // 当前频道总数
-      totalMessages: Array.from(this.channels.values()) // 所有频道的消息总数
-        .reduce((total, channel) => total + channel.messageCount, 0),
-      channelDetails: Array.from(this.channels.entries()).map(([name, channel]) => ({
-        name, // 频道名称
-        subscribers: channel.subscribers.size, // 订阅者数量
-        messageCount: channel.messageCount, // 频道消息数
-        createdAt: channel.createdAt // 频道创建时间
-      }))
-    };
+  async getStats() {
+    try {
+      // 从数据库获取连接统计
+      const totalConnections = await Connection.countDocuments();
+      const activeConnections = await Connection.countDocuments({ status: 'active' });
+      const disconnectedConnections = await Connection.countDocuments({ status: 'disconnected' });
+      
+      // 获取用户角色分布
+      const roleStats = await Connection.aggregate([
+        { $match: { status: 'active' } },
+        { $group: { _id: '$userRole', count: { $sum: 1 } } }
+      ]);
+      
+      return {
+        connections: this.connections.size, // 当前内存中活跃连接数
+        totalConnections, // 数据库中总连接数
+        activeConnections, // 数据库中活跃连接数
+        disconnectedConnections, // 数据库中已断开连接数
+        channels: this.channels.size, // 当前频道总数
+        totalMessages: Array.from(this.channels.values()) // 所有频道的消息总数
+          .reduce((total, channel) => total + channel.messageCount, 0),
+        roleStats: roleStats.reduce((acc, stat) => {
+          acc[stat._id] = stat.count;
+          return acc;
+        }, {}),
+        channelDetails: Array.from(this.channels.entries()).map(([name, channel]) => ({
+          name, // 频道名称
+          subscribers: channel.subscribers.size, // 订阅者数量
+          messageCount: channel.messageCount, // 频道消息数
+          createdAt: channel.createdAt // 频道创建时间
+        }))
+      };
+    } catch (error) {
+      console.error('获取统计信息失败:', error);
+      return {
+        connections: this.connections.size,
+        channels: this.channels.size,
+        totalMessages: 0,
+        error: error.message
+      };
+    }
   }
 
   /**
@@ -482,20 +571,40 @@ class RealtimeService {
    * @param {number} timeoutMs - 超时时间（毫秒），默认5分钟
    * @returns {number} 清理的连接数量
    */
-  cleanupStaleConnections(timeoutMs = 5 * 60 * 1000) { // 默认5分钟超时
-    const now = Date.now();
-    let cleanedCount = 0;
+  async cleanupStaleConnections(timeoutMs = 5 * 60 * 1000) { // 默认5分钟超时
+    try {
+      const now = Date.now();
+      const cutoffTime = new Date(now - timeoutMs);
+      let cleanedCount = 0;
 
-    // 遍历所有连接，检查是否超时
-    for (const [connectionId, connection] of this.connections.entries()) {
-      if (now - connection.lastActivity > timeoutMs) {
-        console.log(`清理过期连接: ${connectionId}`);
-        connection.socket.disconnect(true); // 强制断开连接
-        cleanedCount++;
+      // 遍历所有连接，检查是否超时
+      for (const [connectionId, connection] of this.connections.entries()) {
+        if (now - connection.lastActivity > timeoutMs) {
+          console.log(`清理过期连接: ${connectionId}`);
+          connection.socket.disconnect(true); // 强制断开连接
+          cleanedCount++;
+        }
       }
-    }
 
-    return cleanedCount; // 返回清理的连接数量
+      // 清理数据库中的过期连接记录
+      const dbCleanupResult = await Connection.updateMany(
+        { 
+          status: 'active',
+          lastActivity: { $lt: cutoffTime }
+        },
+        { 
+          status: 'timeout',
+          disconnectedAt: new Date(),
+          disconnectReason: 'timeout'
+        }
+      );
+
+      console.log(`清理了 ${cleanedCount} 个内存连接，${dbCleanupResult.modifiedCount} 个数据库连接`);
+      return cleanedCount; // 返回清理的连接数量
+    } catch (error) {
+      console.error('清理过期连接失败:', error);
+      return 0;
+    }
   }
 }
 

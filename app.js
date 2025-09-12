@@ -6,6 +6,7 @@ import { Server } from 'socket.io';
 
 // 配置和服务
 import { config } from './config/config.js';
+import { connectDatabase } from './config/database.js';
 import RealtimeService from './services/realtimeService.js';
 
 // 中间件
@@ -55,7 +56,7 @@ app.use(requestLogger);
 
 // CORS配置
 app.use(cors({
-  origin: 'http://localhost:5173', // 指定前端域名，不要用通配符
+  origin: '*', // 允许所有域名，生产环境下请指定前端域名，不要用通配符
   credentials: true,
   allowedHeaders: [
     'Content-Type',
@@ -198,7 +199,15 @@ const shutdown = () => {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
-server.listen(config.port, () => {
+// 启动应用
+async function startServer() {
+  try {
+    // 连接数据库
+    await connectDatabase();
+    logger.info('数据库连接成功');
+    
+    // 启动HTTP服务器
+    server.listen(config.port, () => {
   const startupInfo = {
     port: config.port,
     environment: config.nodeEnv,
@@ -217,11 +226,20 @@ server.listen(config.port, () => {
   console.log(`📋 日志目录: ./logs/`);
   console.log('='.repeat(50));
   
-  // 发送系统启动通知
-  setTimeout(() => {
-    realtimeService.broadcastSystemNotification(
-      'info', 
-      'BMT Platform Backend 服务已启动'
-    );
-  }, 1000);
-});
+    // 发送系统启动通知
+    setTimeout(() => {
+      realtimeService.broadcastSystemNotification(
+        'info', 
+        'BMT Platform Backend 服务已启动'
+      );
+    }, 1000);
+    });
+  } catch (error) {
+    logger.error('服务器启动失败', { error: error.message });
+    console.error('❌ 服务器启动失败:', error.message);
+    process.exit(1);
+  }
+}
+
+// 启动服务器
+startServer();

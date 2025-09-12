@@ -1,13 +1,13 @@
 import { v4 as uuidv4 } from 'uuid';
 import logger from '../utils/logger.js';
+import { TelemetryEvent } from '../models/index.js';
 
 /**
  * 遥测服务类
  */
 class TelemetryService {
   constructor() {
-    // 这里可以初始化数据库连接或其他存储服务
-    this.storage = new Map(); // 临时内存存储，实际应该使用数据库
+    // 使用MongoDB存储，移除内存存储
     this.eventBuffer = [];
     this.batchProcessor = null;
     this.initBatchProcessor();
@@ -42,7 +42,7 @@ class TelemetryService {
       for (const event of events) {
         try {
           // 检查是否为重复事件（幂等性）
-          if (this.isDuplicateEvent(event)) {
+          if (await this.isDuplicateEvent(event)) {
             duplicateEvents.push(event.id);
             logger.telemetry('Duplicate Event Detected', { eventId: event.id, type: event.type });
             continue;
@@ -105,22 +105,58 @@ class TelemetryService {
   /**
    * 检查重复事件
    */
-  isDuplicateEvent(event) {
-    return this.storage.has(event.id);
+  async isDuplicateEvent(event) {
+    try {
+      const existingEvent = await TelemetryEvent.findOne({ eventId: event.id });
+      return !!existingEvent;
+    } catch (error) {
+      logger.error('检查重复事件失败', { eventId: event.id, error: error.message });
+      return false;
+    }
   }
 
   /**
    * 存储单个事件
    */
   async storeEvent(event) {
-    // 在实际项目中，这里应该写入数据库
-    // 例如: await EventModel.create(event);
-    
-    this.storage.set(event.id, event);
-    this.eventBuffer.push(event);
-    
-    // 模拟异步数据库操作
-    return new Promise(resolve => setTimeout(resolve, 1));
+    try {
+      // 创建遥测事件文档
+      const telemetryEvent = new TelemetryEvent({
+        eventId: event.id,
+        userId: event.userId,
+        type: event.type,
+        data: event.props || event.data || {},
+        metadata: {
+          userAgent: event.userAgent,
+          ip: event.ip,
+          url: event.url,
+          referrer: event.referrer,
+          timestamp: event.timestamp,
+          processedAt: event.processedAt,
+          receivedAt: event.receivedAt,
+          requestId: event.requestId
+        }
+      });
+      
+      // 保存到数据库
+      await telemetryEvent.save();
+      
+      // 添加到缓冲区用于批处理
+      this.eventBuffer.push(event);
+      
+      logger.telemetry('Event stored', { 
+        eventId: event.id, 
+        type: event.type, 
+        userId: event.userId 
+      });
+      
+    } catch (error) {
+      logger.error('存储事件失败', { 
+        eventId: event.id, 
+        error: error.message 
+      });
+      throw error;
+    }
   }
 
   /**
@@ -247,30 +283,51 @@ class TelemetryService {
   /**
    * 获取统计信息
    */
-  getStats() {
-    return {
-      totalEvents: this.storage.size,
-      bufferSize: this.eventBuffer.length,
-      lastProcessed: new Date().toISOString()
-    };
+  async getStats() {
+    try {
+      const [totalEvents, eventsByType] = await Promise.all([
+        TelemetryEvent.countDocuments(),
+        TelemetryEvent.getEventStatsByType()
+      ]);
+      
+      return {
+        totalEvents,
+        bufferSize: this.eventBuffer.length,
+        eventsByType,
+        lastProcessed: new Date().toISOString()
+      };
+    } catch (error) {
+      logger.error('获取统计信息失败', { error: error.message });
+      return {
+        totalEvents: 0,
+        bufferSize: this.eventBuffer.length,
+        eventsByType: {},
+        lastProcessed: new Date().toISOString()
+      };
+    }
   }
 
   /**
    * 清理过期数据
    */
-  cleanup(olderThanMs = 7 * 24 * 60 * 60 * 1000) { // 默认7天
-    const cutoffTime = Date.now() - olderThanMs;
-    let cleanedCount = 0;
-
-    for (const [id, event] of this.storage.entries()) {
-      if (event.receivedAt < cutoffTime) {
-        this.storage.delete(id);
-        cleanedCount++;
-      }
+  async cleanup(olderThanMs = 7 * 24 * 60 * 60 * 1000) { // 默认7天
+    try {
+      const cutoffDate = new Date(Date.now() - olderThanMs);
+      
+      const result = await TelemetryEvent.deleteMany({
+        createdAt: { $lt: cutoffDate }
+      });
+      
+      logger.telemetry('Events cleaned up', { 
+        deletedCount: result.deletedCount,
+        cutoffDate: cutoffDate.toISOString()
+      });
+      
+      return result.deletedCount;
+    } catch (error) {
+      logger.error('清理过期数据失败', { error: error.message });
+      return 0;
     }
-
-    console.log(`清理了 ${cleanedCount} 个过期事件`);
-    return cleanedCount;
   }
 
   /**
